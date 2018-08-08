@@ -2,13 +2,16 @@ class IMU:
     iteration = 1
     t_prev = 0
 
+    jerk = [0,0,0]
+    accel = [0,0,0]
+
     acceleration = [0,0,0]
     velocity = [0,0,0]
     location = [0,0,0]
 
     quaternion = [1,0,0,0]
 
-    sliding_window = 5
+    sliding_window = 50
     magnitudes = [0]
     velocities_drifted = [[0,0,0]]
 
@@ -18,6 +21,7 @@ class IMU:
         # calculates quaternion to remove effect of gravity and converts to a global reference frame
         #returns 6element vector [forward_back,right_left,up_down,roll,pitch,yaw]
         ss = self.sensors()
+        #ss['accelerometer'] = self.removeGravity(ss['accelerometer'])
         self.quaternion_update(ss['accelerometer'],ss['gyroscope'],ss['compass'])
         self.location_update(self.global_acceleration(ss['accelerometer']))        
         return self.location + self._angles(self.quaternion)
@@ -30,17 +34,37 @@ class IMU:
         #   - gyroscope: xyz (angular veclocities along axes relative to sensor)
         #   - compass: xyz (magnetic strength along axes relative to sensor)
         sensor_data = {}
-        self.iteration += 1
-        for sensor in ('accelerometer','gyroscope','compass'):
-            with open('data/{}.csv'.format(sensor)) as s:
-                for _ in range(self.iteration):
-                    data = s.readline()
-                time,x,y,z = data.strip().split(',')
-            sensor_data[sensor] = [float(x),float(y),float(z)]
-        
-        self.dt = (int(time) - self.t_prev) * .001 #ms
-        self.t_prev += self.dt
+        dt = 0
+        while dt == 0:
+            self.iteration += 1
+            for sensor in ('accelerometer','gyroscope','compass'):
+                with open('data/{}.csv'.format(sensor)) as s:
+                    for _ in range(self.iteration):
+                        data = s.readline()
+                    time,x,y,z = data.strip().split(',')
+                sensor_data[sensor] = [float(x),float(y),float(z)]
+            dt = (int(time) - self.t_prev) / 1000 #ms
+            self.t_prev = int(time) 
+        self.dt = dt
         return sensor_data
+
+    '''
+    def removeGravity(self,acceleration):
+        # differentiate acceleration to find jerk (rate of accel)
+        # filter gradual changes in acceleration to remove gravity
+        # then re-integrate to get acceleration without gravity
+        jerk = [self._differentiate(a,a_prev) for a,a_prev in zip(acceleration,self.acceleration)]
+        
+        dAx = min(10,max(-10,self._integrate(jerk[0],self.jerk[0])))
+        dAy = min(10,max(-10,self._integrate(jerk[1],self.jerk[1])))
+        dAz = min(10,max(-10,self._integrate(jerk[2],self.jerk[2])))
+
+        accel = [self.accel[0] + dAx, self.accel[1] + dAy, self.accel[2] + dAz]
+
+        self.jerk = jerk
+        self.accel = accel
+        return accel
+    '''
 
     def location_update(self,acceleration):
         # updates the current location of device in 3D space 
@@ -50,9 +74,10 @@ class IMU:
         dVy = self._integrate(acceleration[1],self.acceleration[1])
         dVz = self._integrate(acceleration[2],self.acceleration[2])
 
-        velocity_drifted = [self.velocity[0] + dVx, self.velocity[1] + dVy, self.velocity[2] + dVz]        
+        vel_prev = self.velocities_drifted[-1]
+        velocity_drifted = [vel_prev[0] + dVx, vel_prev[1] + dVy, vel_prev[2] + dVz]        
         velocity = self._drift(velocity_drifted,self._minima())
-
+        
         dLx = self._integrate(velocity[0],self.velocity[0])
         dLy = self._integrate(velocity[1],self.velocity[1])
         dLz = self._integrate(velocity[2],self.velocity[2])
@@ -74,8 +99,9 @@ class IMU:
         # [acc_north, acc_east, acc_up] = [rotation_matrix ^-1 ] @ [acc_x,acc_y,acc_z]
         rotation_matrix = self._matrix(self.quaternion)
         acceleration = self._dot(self._inverse(rotation_matrix), [accelerometer])
-        gravity = self._gravity(acceleration[0],self.quaternion)
-        return [a-g for a,g in zip(acceleration[0],gravity)] #remove component of gravity
+        return self._q_minus_q(acceleration[0],[0,0,9.8]) #remove gravity from downward component
+        #gravity = self._gravity(acceleration[0],self.quaternion)
+        #return [a-g for a,g in zip(acceleration[0],gravity)] #remove component of gravity
 
     def quaternion_update(self,accelerometer,gyroscope,magnetometer):
         #ahrs = attitude heading reference system
@@ -120,6 +146,9 @@ class IMU:
         self.quaternion = q
 
     # MATH METHODS
+    def _differentiate(self,y2,y1):
+        return (y2-y1)/self.dt
+
     def _integrate(self,a,b):
         # integration is equivalent to finding the area under the curve 
         # area under 2 points (i.e. assumed to be a straight line) can be approximated to the area of a trapezium h*(a+b)/2
@@ -136,7 +165,7 @@ class IMU:
         # and use it to approximate the drift in velocity
         # corrected velocity returned
         drift = [abs(v) for v in self.velocities_drifted[localMinima]]
-        return [v+d if v < 0 else v-d for v,d in zip(velocity,drift)]     
+        return [v+d if v < 0 else v-d for v,d in zip(velocity,drift)]      
         
     # MATRIX METHODS    
     def _transpose(self,matrix): 
@@ -207,12 +236,7 @@ class IMU:
         t8 = 1 - 2* (x**2 - y**2) 
 
         return [[t0,t1,t2],[t3,t4,t5],[t6,t7,t8]]
-
-    def _gravity(self,acceleration,quaternion):
-        # return vector represnting gravity's influence on device
-        w,x,y,z = quaternion
-        return [2* (x*z - w*y), 2* (w*x + y*z), w**2 - x**2 - y**2 + z**2]
-
+        
     def _angles(self,quaternion):
         # converts a quaternion into euler angles (in degrees NOT rads)
         # Roll = X-axis rotation
@@ -236,31 +260,14 @@ class IMU:
 
         return [roll*RAD2DEG, pitch*RAD2DEG, yaw*RAD2DEG]
 
-
-from matplotlib import pyplot
-from mpl_toolkits.mplot3d import Axes3D
-def display(a,v,s):
-    fig = pyplot.plot(range(len(a)),a,color='r')
-    fig = pyplot.plot(range(len(v)),v,color='b')
-    fig = pyplot.plot(range(len(s)),s,color='g')
-    pyplot.show()
-vXs,vYs,vZs = [],[],[]
-lXs, lYs, lZs = [],[],[]
+    '''
+    def _gravity(self,acceleration,quaternion):
+        # return vector represnting gravity's influence on device
+        w,x,y,z = quaternion
+        return [2* (x*z - w*y), 2* (w*x + y*z), w**2 - x**2 - y**2 + z**2]
+    '''
 
 odometer = IMU()
-for _ in range(2500):
+for _ in range(500):
     degrees_freedom = odometer.step()
-
-    vXs.append(odometer.velocity[0])
-    vYs.append(odometer.velocity[1])
-    vZs.append(odometer.velocity[2])
-    lXs.append(odometer.location[0])
-    lYs.append(odometer.location[1])
-    lZs.append(odometer.location[2])
-
-display(vXs,vYs,vZs)
-display(lXs,lYs,lZs)
-fig = pyplot.figure()
-axis = Axes3D(fig)
-axis.plot(lXs,lYs,lZs)
-pyplot.show()
+    
