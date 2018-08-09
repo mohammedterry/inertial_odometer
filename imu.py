@@ -2,6 +2,9 @@ class IMU:
     iteration = 1
     t_prev = 0
 
+    PI = 3.14159265359
+    RAD2DEG = 180/PI
+    
     jerk = [0,0,0]
     accel = [0,0,0]
 
@@ -99,15 +102,88 @@ class IMU:
         # [acc_north, acc_east, acc_up] = [rotation_matrix ^-1 ] @ [acc_x,acc_y,acc_z]
         rotation_matrix = self._matrix(self.quaternion)
         acceleration = self._dot(self._inverse(rotation_matrix), [accelerometer])
-        return self._q_minus_q(acceleration[0],[0,0,9.8]) #remove gravity from downward component
-        #gravity = self._gravity(acceleration[0],self.quaternion)
-        #return [a-g for a,g in zip(acceleration[0],gravity)] #remove component of gravity
+        return acceleration[0]
 
-    def quaternion_update(self,accelerometer,gyroscope,magnetometer):
+    def quaternion_update(self,accelerometer, gyroscope, magnetometer):
+        #This implementation of Madgwicks algorithm seems better than "alternative" version
+        # GYROSCOPE 
+        # assumes gyroscopes are in deg/s -> convert to rad/s
+        gx,gy,gz = gyroscope
+        gx /= self.RAD2DEG
+        gy /= self.RAD2DEG
+        gz /= self.RAD2DEG
+        
+        q0,q1,q2,q3 = self.quaternion
+        qDot = [
+            .5* (-q1*gx - q2*gy - q3*gz),   
+            .5* (q0*gx + q2*gz - q3*gy),  
+            .5* (q0*gy - q1*gz + q3*gx), 
+            .5* (q0*gz + q1*gy - q2*gx)
+        ]
+
+        if sum(accelerometer) > 0:
+            # normalise acceleration & magnetometer
+            ax,ay,az = self._div(accelerometer, self._norm(accelerometer) )
+            mx,my,mz = self._div(magnetometer, self._norm(magnetometer))
+            # using Earths magnetic field as a reference
+            _2q0mx = 2*q0*mx
+            _2q0my = 2*q0*my
+            _2q0mz = 2*q0*mz
+            _2q1mx = 2*q1*mx
+            _2q0 = 2*q0
+            _2q1 = 2*q1
+            _2q2 = 2*q2
+            _2q3 = 2*q3
+            _2q0q2 = 2*q0* q2
+            _2q2q3 = 2 * q2 * q3
+            q0q0 = q0 * q0
+            q0q1 = q0 * q1
+            q0q2 = q0 * q2
+            q0q3 = q0 * q3
+            q1q1 = q1 * q1
+            q1q2 = q1 * q2
+            q1q3 = q1 * q3
+            q2q2 = q2 * q2
+            q2q3 = q2 * q3
+            q3q3 = q3 * q3
+            
+            hx = mx * q0q0 - _2q0my * q3 + _2q0mz * q2 + mx * q1q1 + _2q1 * my * q2 + _2q1 * mz * q3 - mx * q2q2 - mx * q3q3
+            hy = _2q0mx * q3 + my * q0q0 - _2q0mz * q1 + _2q1mx * q2 - my * q1q1 + my * q2q2 + _2q2 * mz * q3 - my * q3q3
+            
+            _2bx = (hx * hx + hy * hy)**.5
+            _2bz = -_2q0mx * q2 + _2q0my * q1 + mz * q0q0 + _2q1mx * q3 - mz * q1q1 + _2q2 * my * q3 - mz * q2q2 + mz * q3q3
+            _4bx = 2 * _2bx
+            _4bz = 2 * _2bz
+        
+            # gradient decent alg 
+            s0 = -_2q2 * (2 * q1q3 - _2q0q2 - ax) + _2q1 * (2 * q0q1 + _2q2q3 - ay) - _2bz * q2 * (_2bx * (.5 - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (-_2bx * q3 + _2bz * q1) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + _2bx * q2 * (_2bx * (q0q2 + q1q3) + _2bz * (.5 - q1q1 - q2q2) - mz)
+            s1 = _2q3 * (2 * q1q3 - _2q0q2 - ax) + _2q0 * (2 * q0q1 + _2q2q3 - ay) - 4 * q1 * (1 - 2 * q1q1 - 2 * q2q2 - az) + _2bz * q3 * (_2bx * (.5 - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (_2bx * q2 + _2bz * q0) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + (_2bx * q3 - _4bz * q1) * (_2bx * (q0q2 + q1q3) + _2bz * (.5 - q1q1 - q2q2) - mz)
+            s2 = -_2q0 * (2 * q1q3 - _2q0q2 - ax) + _2q3 * (2 * q0q1 + _2q2q3 - ay) - 4 * q2 * (1 - 2 * q1q1 - 2 * q2q2 - az) + (-_4bx * q2 - _2bz * q0) * (_2bx * (.5 - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (_2bx * q1 + _2bz * q3) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + (_2bx * q0 - _4bz * q2) * (_2bx * (q0q2 + q1q3) + _2bz * (.5 - q1q1 - q2q2) - mz)
+            s3 = _2q1 * (2 * q1q3 - _2q0q2 - ax) + _2q2 * (2 * q0q1 + _2q2q3 - ay) + (-_4bx * q3 + _2bz * q1) * (_2bx * (.5 - q2q2 - q3q3) + _2bz * (q1q3 - q0q2) - mx) + (-_2bx * q0 + _2bz * q2) * (_2bx * (q1q2 - q0q3) + _2bz * (q0q1 + q2q3) - my) + _2bx * q1 * (_2bx * (q0q2 + q1q3) + _2bz * (.5 - q1q1 - q2q2) - mz)
+            s = [s0,s1,s2,s3]
+            s = self._div(s, self._norm(s))
+            #feedback
+            qDot[0] -= s0
+            qDot[1] -= s1
+            qDot[2] -= s2
+            qDot[3] -= s3
+
+        q0 += qDot[0] * self.dt
+        q1 += qDot[1] * self.dt
+        q2 += qDot[2] * self.dt
+        q3 += qDot[3] * self.dt
+        q = [q0,q1,q2,q3]
+        #normalise results
+        self.quaternion = self._div(q, self._norm(q))
+
+    
+    def quaternion_update_alternative(self,accelerometer,gyroscope,magnetometer):
         #ahrs = attitude heading reference system
         # sensor fusion to calculate a rotation vector 
         # (algorithm: madwicks quaternion update)
-        
+        # sensor inputs assumed to be in m/s^2 (accel) and deg/s (gyro)
+        # convert deg/s -> rad/s
+        gyroscope = self._div(gyroscope, self.RAD2DEG)
         #normalise sensor readings
         accelerometer = self._div(accelerometer,self._norm(accelerometer))
         magnetometer = self._div(magnetometer,self._norm(magnetometer)) 
@@ -243,8 +319,6 @@ class IMU:
         # Pitch = Y-axis rotation
         # Yaw = Z-axis rotation
         from math import atan2,asin
-        PI = 3.14159265359
-        RAD2DEG = 180/PI
         w,x,y,z = quaternion
 
         sinX = 2* (w*x + y*z)
@@ -258,16 +332,29 @@ class IMU:
         cosZ = 1 - 2* (y**2 + z**2)
         yaw = atan2(sinZ,cosZ)
 
-        return [roll*RAD2DEG, pitch*RAD2DEG, yaw*RAD2DEG]
+        return [roll*self.RAD2DEG, pitch*self.RAD2DEG, yaw*self.RAD2DEG]
 
-    '''
-    def _gravity(self,acceleration,quaternion):
-        # return vector represnting gravity's influence on device
-        w,x,y,z = quaternion
-        return [2* (x*z - w*y), 2* (w*x + y*z), w**2 - x**2 - y**2 + z**2]
-    '''
+def display(a,v,s):
+    from matplotlib import pyplot
+    from mpl_toolkits.mplot3d import Axes3D
 
+    fig = pyplot.plot(range(len(a)),a,color='r')
+    fig = pyplot.plot(range(len(v)),v,color='b')
+    fig = pyplot.plot(range(len(s)),s,color='g')
+    pyplot.show()
+
+    fig = pyplot.figure()
+    axis = Axes3D(fig)
+    axis.plot(a,v,s)
+    pyplot.show()
+
+Xs,Ys,Zs = [],[],[]
 odometer = IMU()
-for _ in range(500):
+for _ in range(1500):
     degrees_freedom = odometer.step()
-    
+    x,y,z,_,_,_ = degrees_freedom
+    Xs.append(x)
+    Ys.append(y)
+    Zs.append(z)
+
+display(Xs,Ys,Zs)
